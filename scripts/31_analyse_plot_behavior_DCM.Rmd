@@ -1,0 +1,1470 @@
+---
+title: "Behavioral_Brain_Correlations"
+author: "Gerasimos Gerardos"
+date: "2026-01-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(nlme)
+library(lme4)
+library(data.table)
+library(lmerTest)
+library(tidyverse)
+library(ICC)
+library(readxl)
+library(parameters)
+library(ggpubr)
+library(ggsignif)
+library(see)
+library(ARTool)
+library(BayesFactor)
+
+
+```
+
+
+```{r}
+if (!require("tidyverse")) install.packages("tidyverse", dependencies = T)
+if (!require("tidyr")) install.packages("tidyr", dependencies = T)
+if (!require("dplyr")) install.packages("diplyr", dependencies = T)
+if (!require("lubridate")) install.packages("lubridate", dependencies = T)
+if (!require("readr")) install.packages("readr", dependencies = T)
+if (!require("forcats")) install.packages("forcats", dependencies = T)
+if (!require("fs")) install.packages("fs", dependencies = T)
+if (!require("readxl")) install.packages("readxl", dependencies = T)
+if (!require("stats")) install.packages("stats", dependencies = T)
+if (!require("ggplot2")) install.packages("stats", dependencies = T)
+if (!require("base")) install.packages("stats", dependencies = T)
+library(car)
+if (!require("ggridges")) install.packages("ggridges", dependencies = T)
+if (!require("ggplot")) install.packages("ggplot", dependencies = T)
+if (!require("ggbeeswarm")) install.packages("ggbeeswarm", dependencies = T)
+if (!require("afex")) install.packages("afex", dependencies = T)
+if (!require("sjPlot")) install.packages("sjPlot", dependencies = T)
+if (!require("readxl")) install.packages("readxl", dependencies = T)
+if (!require("bayestestR")) install.packages("bayestestR", dependencies = T)
+if (!require("brms")) install.packages("brms", dependencies = T)
+```
+
+
+Set working directory
+
+```{r}
+work_directory <- "/data/pt_02809/MeMoSLAP/p4_dcm/final_codes/LMM_DCM_Analysis/LMM_DCM_true_concat_512max/long_task_table"
+setwd(work_directory)
+
+```
+Laod raw PsychoPy files
+```{r}
+files <- list.files(work_directory, pattern = "*.csv", full.names = TRUE)
+
+# Initialize an empty list to store data frames
+data_list <- list()
+
+# Read each file and store it in the list
+for (file in files) {
+  tryCatch({
+    # Read each CSV file with the full path
+    data <- read.csv(file, header = TRUE, sep = ",", na.strings = "NA", stringsAsFactors = FALSE)
+    # Store the data frame in the list
+    data_list[[file]] <- data
+  }, error = function(e) {
+    cat("Error in file:", file, "\n", e, "\n")
+  })
+}
+```
+
+Files connected:
+
+```{r}
+
+# Identify common columns
+common_cols <- Reduce(intersect, lapply(data_list, names))
+
+# Filter each data frame to include only common columns
+filtered_data_list <- lapply(data_list, function(df) df[, common_cols, drop = FALSE])
+
+# Combine data frames using bind_rows
+Data_complete <- do.call(rbind,filtered_data_list)
+
+## create a Data Set that ommits the NA values of the variable curr_n_back:
+
+Data_complete_clean <- Data_complete[!is.na(Data_complete$curr_n_back), ]
+
+# Check the structure of the new data set
+#str(Data_complete_clean)
+
+```
+
+Accuracy:
+
+```{r}
+
+# Calculate accuracy, false alarm rate, and miss rate by participant and difficulty level (curr_n_back)
+metrics_by_condition <- Data_complete_clean %>%
+  group_by(participant, curr_n_back) %>%
+  summarise(
+    Correct = sum(result == "Correct", na.rm = TRUE),
+    Correct_rejected = sum(result == "Okay", na.rm = TRUE),
+    Miss = sum(result == "Absent", na.rm = TRUE),
+    False_Alarm = sum(result == "Incorrect", na.rm = TRUE),
+    Total = n()
+  ) %>%
+  mutate(
+    Accuracy = (Correct + Correct_rejected) / Total,
+    False_Alarm_rate = False_Alarm / Total,
+    Miss_rate = Miss / Total
+  )
+
+
+```
+
+d' analysis
+
+```{r}
+# adjusted ratios (Hautus, 1995) --> recommended by Gerry: Maybe ask him again? https://www.researchgate.net/post/What-does-a-high-D-prime-score-mean
+      # https://neuropsychology.github.io/psycho.R/2018/03/29/SDT.html
+
+# Calculate hit rate (HR) and false alarm rate (FAR) for each participant and condition
+hit_false_alarm_rates <- Data_complete_clean %>%
+  group_by(participant, curr_n_back, block.thisN) %>%
+  summarise(
+    Hits = sum(result == "Correct", na.rm = TRUE),
+    Misses = sum(result == "Absent", na.rm = TRUE),
+    False_Alarms = sum(result == "Incorrect", na.rm = TRUE),
+    Correct_Rejections = sum(result == "Okay", na.rm = TRUE),
+    Total_Target = Hits + Misses,
+    Total_NonTarget = False_Alarms + Correct_Rejections,
+    
+    HR = (sum(result == "Correct", na.rm = TRUE) + 0.5) / (sum(result == "Correct", na.rm = TRUE) + sum(result == "Absent", na.rm = TRUE) + 1), # Adjusted Hit Rate: Hautus correction
+    FAR = (sum(result == "Incorrect", na.rm = TRUE) + 0.5) / (sum(result == "Incorrect", na.rm = TRUE) + sum(result == "Okay", na.rm = TRUE) + 1)  # Adjusted False Alarm Rate: Hautus correction
+  )
+
+# Compute d' for each participant and condition
+d_prime_values <- hit_false_alarm_rates %>%
+  mutate(d_prime = qnorm(HR) - qnorm(FAR)) %>%
+  ungroup() %>%
+  select(participant, curr_n_back, d_prime, block.thisN) %>%
+  distinct() # Keep unique values
+
+# Print the d' values
+d_prime_values
+
+#write.csv(d_prime_values, "/data/pt_02809/MeMoSLAP/p4_dcm/final_codes/nback_behaviour/tables/d_values_raw.csv", row.names = FALSE, col.names = TRUE)
+
+
+```
+
+
+Average d-prime per session: if raw file not available load the d-prime raw table
+```{r}
+#d_prime_values <- read.csv("/data/pt_02809/MeMoSLAP/p4_dcm/final_codes/nback_behaviour/tables/d_values_raw.csv", header = TRUE, stringsAsFactors = FALSE)
+
+# Calculate the average d' for each participant (without session identifier) and condition
+session_average_d_prime <- d_prime_values %>%
+  group_by(participant, curr_n_back) %>%
+  summarise(mean_d_prime = mean(d_prime, na.rm = TRUE)) %>%
+  ungroup()
+
+# Print the averaged d' values
+session_average_d_prime
+
+```
+
+NEW Averages grouped over Participants and sessions:
+
+```{r}
+# Calculate the average d' for each participant and condition over the two sessions
+session_average_d_prime <- d_prime_values %>%
+  mutate(participant_id = sapply(d_prime_values$participant, function(x) {
+  # Extract the single match of "40xx"
+  regmatches(x, regexpr("40\\d{2}", x))
+}))  %>%
+  group_by(participant_id, curr_n_back) %>%
+  summarise(mean_d_prime = mean(d_prime, na.rm = TRUE)) %>%
+  ungroup()
+
+# Print the averaged d' values
+session_average_d_prime
+
+```
+Prepare data for statistics and plotting
+```{r}
+d_n <- as.data.frame(session_average_d_prime)
+d_n$curr_n_back <- as.factor(d_n$curr_n_back)
+
+
+idx_nback <- unique(d_n$curr_n_back)
+d_n$out_flag <- NaN
+for (n in idx_nback) {
+  # Calculate Tukey's fences
+  Q1 <- quantile(d_n[d_n$curr_n_back==n, c("mean_d_prime")], 0.25)
+  Q3 <- quantile(d_n[d_n$curr_n_back==n, c("mean_d_prime")], 0.75)
+  IQR <- Q3 - Q1
+  lower_fence <- Q1 - 1.5 * IQR
+  upper_fence <- Q3 + 1.5 * IQR
+  d_n[d_n$curr_n_back==n, c("out_flag")]<- ifelse(d_n[d_n$curr_n_back==n, c("mean_d_prime")] < lower_fence | d_n[d_n$curr_n_back==n, c("mean_d_prime")] > upper_fence, "outlier", "inlier")
+}
+
+d_n
+```
+
+Friedman tests and post-hoc paired Wilcoxon tests
+```{r}
+# Global test
+fried_test <- friedman.test(cbind(d_n$mean_d_prime[d_n$curr_n_back==0],
+                                  d_n$mean_d_prime[d_n$curr_n_back==1],
+                                  d_n$mean_d_prime[d_n$curr_n_back==2],
+                                  d_n$mean_d_prime[d_n$curr_n_back==3]))
+
+avg_d_tests <- data.frame(
+  method = fried_test$method,
+  data = "0, 1, 2, 3 -back",
+  statistic = as.numeric(fried_test$statistic),
+  p_value = round(fried_test$p.value, 3),
+  p_bonferroni = NA
+)
+
+paired_wilcox <- function(x, y) {
+  # Perform paired Wilcoxon test
+  test_result <- wilcox.test(x, y, paired = TRUE, exact = FALSE)
+  return(test_result)
+}
+
+k =  length(idx_nback)
+n_com = (k * (k - 1)) / 2
+
+if (avg_d_tests$p_value[1] < 0.5) {
+
+  options(digits = 4)
+  i = 0
+  for (n in list( c("0", "1"), c("0", "2"),c("0", "3"), c("1", "2"),c("1", "3"), c("2", "3"))){
+    
+    x = d_n$mean_d_prime[d_n$curr_n_back==as.numeric(n[1])]
+    y = d_n$mean_d_prime[d_n$curr_n_back==as.numeric(n[2])]
+    wil_test <- paired_wilcox(x,y)
+    
+    ntest <- data.frame(
+      method = wil_test$method,
+      data = paste0(n[1],' vs ',n[2],' -back'),
+      statistic = NA,
+      p_value = round(wil_test$p.value, 3),
+      p_bonferroni = round(wil_test$p.value*n_com, 3)
+    )
+    
+    avg_d_tests[2+i,] <- ntest 
+    i = i+1
+    
+  }
+}
+
+avg_d_tests
+
+```
+Plot results
+```{r}
+
+
+dn <-ggplot(d_n, aes(x=curr_n_back, y=mean_d_prime, fill=curr_n_back)) +
+  geom_violin() + 
+  geom_boxplot(width = 0.1, color = "black", fill = NA,outlier.shape = NA) + 
+  geom_jitter(position=position_jitter(0.03), aes(color = out_flag), size = 0.5)+
+  scale_color_manual(values = c("black", "red3"))
+
+if (avg_d_tests$p_value[1] < 0.5) {
+  dn <- dn +
+  geom_signif(
+    comparisons = list( c("0", "1"), c("1", "2"), c("2", "3")),
+    map_signif_level = c("***"=0.001/n_com, "**"=0.01/n_com, "*"=0.05/n_com), 
+    y_position = 4, textsize = 5, vjust = 0.8,
+    test  = paired_wilcox) +
+  geom_signif(
+    comparisons = list( c("0", "2")),
+    map_signif_level = c("***"=0.001/n_com, "**"=0.01/n_com, "*"=0.05/n_com),
+    y_position = 4.2, textsize = 5,  vjust = 0.8, tip_length = 0.02,
+    test  = paired_wilcox) +
+  geom_signif(
+    comparisons = list(c("1", "3")),
+    map_signif_level = c("***"=0.001/n_com, "**"=0.01/n_com, "*"=0.05/n_com),
+    y_position = 4.4, textsize = 5,  vjust = 0.8, tip_length = 0.02,
+    test  = paired_wilcox) +
+  geom_signif(
+    comparisons = list( c("0", "3")),
+    map_signif_level = c("***"=0.001/n_com, "**"=0.01/n_com, "*"=0.05/n_com),
+    y_position =4.6, textsize = 5,  vjust = 0.8,
+    test  = paired_wilcox) 
+}
+  
+dn <- dn +
+  labs(x = "n-back Condition", y = "Sensitivity (d')") +
+  #ggtitle("Mean Senstivity (d') per n-back Condition") + # for the main title
+  theme_modern() +
+  scale_fill_okabeito(palette = "full", order = c(1, 5, 3, 6))
+
+dn
+
+```
+session tests
+
+```{r}
+# Calculate the average d' for each participant and condition over the two sessions
+session_d_prime <- d_prime_values %>%
+  group_by(participant, curr_n_back) %>%
+  summarise(mean_d_prime = mean(d_prime, na.rm = TRUE)) %>%
+  ungroup()
+
+# Print the averaged d' values
+session_d_prime
+
+```
+```{r}
+
+d_s <- session_d_prime
+d_s <- as.data.frame(d_s)
+d_s$session[grepl("1$", d_s$participant)] <- "1"
+d_s$session[grepl("2$", d_s$participant)] <- "2"
+
+d_s$participant <- sapply(d_s$participant, function(x) {
+  # Extract the single match of "40xx"
+  regmatches(x, regexpr("40\\d{2}", x))
+})
+
+
+d_s$out_flag <- NaN
+sess <- unique(d_s$session)
+for (n in idx_nback) {
+  for (s in sess) {
+    # Calculate Tukey's fences
+    Q1 <- quantile(d_s[d_s$curr_n_back==n & d_s$sess==s, c("mean_d_prime")], 0.25)
+    Q3 <- quantile(d_s[d_s$curr_n_back==n & d_s$sess==s, c("mean_d_prime")], 0.75)
+    IQR <- Q3 - Q1
+    lower_fence <- Q1 - 1.5 * IQR
+    upper_fence <- Q3 + 1.5 * IQR
+    d_s[d_s$curr_n_back==n & d_s$sess==s, c("out_flag")]<- ifelse(d_s[d_s$curr_n_back==n & d_s$sess==s, c("mean_d_prime")] < lower_fence | d_s[d_s$curr_n_back==n & d_s$sess==s, c("mean_d_prime")] > upper_fence, "outlier", "inlier")
+  }
+}
+
+d_s
+```
+
+```{r}
+
+d_s$curr_n_back <- as.factor(d_s$curr_n_back)
+d_s$participant <-as.factor(d_s$participant)
+d_s$session <- as.factor(d_s$session)
+
+df_art <- art(mean_d_prime ~ curr_n_back * session + (1 | participant), data = d_s )
+
+# Perform ART ANOVA
+art_anova_results <- anova(df_art)
+
+
+# Print results
+print(art_anova_results)
+
+df_text <- capture.output(print(art_anova_results))
+
+
+if (art_anova_results['session','Pr(>F)']<=0.05 | art_anova_results['curr_n_back:session','Pr(>F)']<=0.05)
+{
+  wide_ses <- d_s %>%
+    unite("back_sess", curr_n_back, session, sep = "back_sess") %>%  # combine back and sess
+    pivot_wider(
+      id_cols = code,
+      names_from = back_sess,
+      values_from = mean_d_prime
+    )
+  
+  wide_matrix <- wide_ses %>%
+    select(-participant) %>%       # Remove the identifier column
+    as.matrix()             # Convert to matrix
+  
+  # Get all unique pairwise combinations of columns
+  combinations <- combn(colnames(wide_matrix), 2, simplify = FALSE)
+  
+  # Apply paired Wilcoxon test to each pair
+  wilcox_results <- lapply(combinations, function(pair) {
+    test <- wilcox.test(wide_matrix[, pair[1]], wide_matrix[, pair[2]], paired = TRUE, exact = FALSE)
+    data.frame(
+      group1 = pair[1],
+      group2 = pair[2],
+      p_value = test$p.value
+    )
+  })
+  
+  # Combine results into a data frame
+  results_df <- do.call(rbind, wilcox_results)
+  
+  # Apply Bonferroni correction
+  results_df$adjusted_p <- p.adjust(results_df$p_value, method = "bonerroni")
+  
+  results_df <- results_df %>%
+    mutate(significance = case_when(
+      adjusted_p <= 0.001 ~ "***",
+      adjusted_p <= 0.01  ~ "**",
+      adjusted_p <= 0.05  ~ "*",
+      TRUE                ~ "ns"
+    ))
+  print(results_df)
+}
+
+
+```
+```{r}
+
+
+dses <- ggplot(d_s, aes(x = curr_n_back, y = mean_d_prime, fill = interaction(session, curr_n_back))) +
+  geom_violin() + 
+  geom_boxplot(aes(group = interaction(session, curr_n_back)), position = position_dodge(width = 0.9), width = 0.1, color = "black", fill = NA,outlier.shape = NA) +
+  geom_point(aes(group = interaction(session, curr_n_back)), position = position_dodge(width = 0.9), size = 0.5,color = "black") +
+  
+  # Lines connecting data points from session 1 to session 2
+  geom_line(aes(x = as.numeric(curr_n_back) + 
+                  ifelse(session == levels(session)[1], -0.375/2, 0.375/2), 
+                group = interaction(participant, curr_n_back)),
+            alpha = 0.6, color = "gray40", linetype = "dotted") +  
+  #ggtitle("Sensitivity (d') of individual blocks per n-back level") + # for the main title
+  labs(x = "n-back Condition", y = "Sensitivity (d')")+
+  #stat_compare_means(method = "wilcox.test", paired = TRUE, label.y = 4.9, p.adjust.method = "bonferroni" )+
+  theme_modern() +
+  scale_fill_manual(name = "nback x session", labels = c("0back in ses-1","0back in ses-2","1back in ses-1","1back in ses-2","2back in ses-1","2back in ses-2","3back in ses-1","3back in ses-2"),
+                    values = c( "goldenrod1","goldenrod3", "dodgerblue","dodgerblue3","seagreen3","seagreen4","tomato1","tomato3")) +
+  scale_color_manual(name = "nback x session", labels = c("0back in ses-1","0back in ses-2","1back in ses-1","1back in ses-2","2back in ses-1","2back in ses-2","3back in ses-1","3back in ses-2"),
+                     values = c( "goldenrod3","goldenrod4","dodgerblue3","dodgerblue4","seagreen4","darkgreen","tomato3","tomato4")) +
+  theme(
+    axis.ticks.length = unit(5, "pt"),  # makes ticks longer (more dash-like)
+    axis.ticks = element_line(linewidth = 0.5, linetype = "solid", color = "black")
+  )+
+  ylim(0.8, 4)
+
+dses
+```
+
+Without 0back:
+
+```{r}
+
+# Calculate the average d' for each participant and condition, excluding 0-back
+session_average_d_prime_123 <- session_average_d_prime %>%
+  filter(curr_n_back != "0")
+
+# Print the averaged d' values
+session_average_d_prime_123
+
+```
+
+```{r}
+# Load the DCM connectivity data from Excel file
+dcm_data <- read_excel("/data/pt_02809/MeMoSLAP/p4_dcm/final_codes/DCM_true_concat_512max/modulatory_connectivity_B_n1back_Mean_DCM_analysis_mask_CER_PAR_IFG_ROI_s4fmap_brain_true_concat_512max.xlsx")
+
+# View the first few rows of your data to understand its structure
+#head(dcm_data)
+#head(session_average_d_prime_123)
+
+
+# Create a vector of participant IDs excluding 4004
+participant_ids <- unique(session_average_d_prime_123$participant_id)
+
+# Assign to the data frame
+dcm_data <- dcm_data %>%
+  mutate(participant_id = participant_ids)
+
+# Print the updated dcm_data to verify the change
+#dcm_data
+
+# Combine the dPrime table with the B-matrix parameters table
+mcombined_data <- session_average_d_prime_123 %>%
+  left_join(dcm_data, by = "participant_id")  # Join by participant ID
+
+# Print the combined data
+#combined_data
+
+# Load the DCM connectivity data from Excel file
+dcm_data <- read_excel("/data/pt_02809/MeMoSLAP/p4_dcm/final_codes/DCM_true_concat_512max/modulatory_connectivity_B_n2back_Mean_DCM_analysis_mask_CER_PAR_IFG_ROI_s4fmap_brain_true_concat_512max.xlsx")
+
+# Assign to the data frame
+dcm_data <- dcm_data %>%
+  mutate(participant_id = participant_ids)
+
+# Print the updated dcm_data to verify the change
+#dcm_data
+
+# Combine the dPrime table with the B-matrix parameters table
+mcombined_data <- mcombined_data %>%
+  left_join(dcm_data, by = "participant_id")  # Join by participant ID
+
+# Print the combined data
+#combined_data
+
+# Load the DCM connectivity data from Excel file
+dcm_data <- read_excel("/data/pt_02809/MeMoSLAP/p4_dcm/final_codes/DCM_true_concat_512max/modulatory_connectivity_B_n3back_Mean_DCM_analysis_mask_CER_PAR_IFG_ROI_s4fmap_brain_true_concat_512max.xlsx")
+
+# Assign to the data frame
+dcm_data <- dcm_data %>%
+  mutate(participant_id = participant_ids)
+
+# Print the updated dcm_data to verify the change
+#dcm_data
+
+# Combine the dPrime table with the B-matrix parameters table
+mcombined_data <- mcombined_data %>%
+  left_join(dcm_data, by = "participant_id")  # Join by participant ID
+
+# Print the combined data
+mcombined_data
+
+
+
+```
+```{r}
+
+# Initialize a data frame to store correlation results with p-values
+Bayes_correlation_results_nback_mod <- data.frame(
+  Connectivity_Variable = character(),
+  Bayesian_Factor = numeric(),
+  median_r = numeric(),
+  CI_lower95_r = numeric(),
+  CI_upper95_r= numeric(),
+  Significance = character(),
+  stringsAsFactors = FALSE
+)
+
+interpret_bayes_factor <- function(bf) {
+  if (bf <= 1 ) {
+    interpretation <- "Null"
+  } else if (bf > 1 && bf <= 3) {
+    interpretation <- "Weak"
+  } else if (bf > 3 && bf <= 10) {
+    interpretation <- "Moderate"
+  } else if (bf > 10 && bf <= 30) {
+    interpretation <- "Strong"
+  } else if (bf > 30 && bf <= 100) {
+    interpretation <- "Very strong "
+  } else if (bf > 100) {
+    interpretation <- "Extreme"
+  } else {
+    interpretation <- "Uninterpretable value"
+  }
+  return(interpretation)
+}
+
+for (n_level in 1:3) {
+  # Filter data for 3-back condition
+  Bayes_mod_data_nback <-mcombined_data %>%
+    filter(curr_n_back == n_level)
+  
+  # Extract column names
+    connectivity_variables <- colnames(mcombined_data)[startsWith(colnames(mcombined_data), paste0('n',as.character(n_level)))]
+    
+  # Loop through each connectivity variable, run cor.test, and extract the correlation coefficient and p-value
+  for (var in connectivity_variables) {
+    # Perform the cor.test for the current variable
+    
+    cor_test <- correlationBF(
+    x = Bayes_mod_data_nback$mean_d_prime,
+    y = Bayes_mod_data_nback[[var]]
+  )
+    
+    
+    set.seed(2025)
+    post <- posterior(cor_test, iterations = 50000)   # MCMC samples
+    rho  <- as.numeric(post[,"rho"])                # posterior draws of r
+    
+    median_r <- median(rho)
+    ci_r     <- quantile(rho, c(.025, .975))        # 95% credible interval
+    c(median_r = median_r, l95 = ci_r[1], u95 = ci_r[2])
+    # Determine significance based on p-value
+    # Convert to data frame and extract the BF value
+    bf_df <- as.data.frame(cor_test)
+    bf_value <- bf_df$bf[1] 
+    
+    significance <- interpret_bayes_factor(bf_value)
+    
+    # Append results to the data frame
+    Bayes_correlation_results_nback_mod <- rbind(Bayes_correlation_results_nback_mod, data.frame(
+      Connectivity_Variable = var,
+      Bayesian_Factor = bf_value,
+      median_r = median_r,
+      CI_lower95_r = ci_r[1],
+      CI_upper95_r = ci_r[2],
+      Significance = significance
+    ))
+  }
+}
+# Print the updated correlation results with p-values and significance
+Bayes_correlation_results_nback_mod
+
+
+
+```
+```{r}
+
+
+filtered_bay_nback<- Bayes_correlation_results_nback_mod %>%
+  filter(Significance != "Null" )
+kept_indices <- which(Bayes_correlation_results_nback_mod$Significance != "Null")
+
+colr = c("#0072B2","#009E73","#D55E00") #E69F00
+
+if (!is_empty(kept_indices)){
+  for (i in 1:nrow(filtered_bay_nback))
+  {
+   n_level <- filtered_bay_nback$Connectivity_Variable[i]
+   n_level <- as.numeric(substr(n_level, 2, 2))
+   
+    Bayes_mod_data_nback <-mcombined_data %>%
+      filter(curr_n_back == n_level)
+   
+   
+    con_name = filtered_bay_nback[i,1]
+    just_con = substr(con_name, 8, nchar(con_name))
+    
+    # Convert the Bayes Factor output to a data frame and extract the relevant value
+    bayes_factor_df_nback_mod <- as.data.frame(filtered_bay_nback[i,])
+    bayes_factor_nback_mod <- bayes_factor_df_nback_mod$Bayesian_Factor[1]  # Adjust as necessary based on the output structure
+    r_bf = bayes_factor_df_nback_mod$median_r
+   
+    
+    
+    # Create the plot
+    mbplot <- ggplot(Bayes_mod_data_nback, aes(x = mean_d_prime, y = .data[[con_name]])) +
+      geom_point(alpha = 0.6) +  # Scatter plot points
+      geom_smooth(method = "lm", color = colr[n_level], se = FALSE) +  # Regression line
+      labs(
+        title = paste0("Correlation of Sensitivity with Connectivity Modulation: \n", just_con, " in ", as.character(n_level), "-back"),
+        x = "Mean Sensitivity (d')",
+        y =  "Modulation (Hz)"
+      ) +
+      theme_modern() + 
+      xlim(1, 3.5) +  
+      ylim(-1, 1) +
+     
+      theme(
+        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+        axis.title = element_text(size = 14)
+      ) +
+      # Add correlation and Bayes Factor text
+      annotate("text", x = Inf, y = Inf,
+               label = paste("BF:", round(bayes_factor_nback_mod, 3),"\nrho:",round(r_bf, 3)), 
+               hjust = 1.1, vjust = 1.5, size = 4, color = "black", fontface = "italic")
+    
+    
+    print(mbplot)
+  }
+}else {
+  print('No evidence at all')
+}
+  
+```
+
+```{r}
+# Load the DCM connectivity data from Excel file
+dcm_data <- read_excel("/data/pt_02809/MeMoSLAP/p4_dcm/final_codes/DCM_true_concat_512max/intrinsic_connectivity_A_Mean_DCM_analysis_mask_CER_PAR_IFG_ROI_s4fmap_brain_true_concat_512max.xlsx")
+
+# View the first few rows of your data to understand its structure
+head(dcm_data)
+head(session_average_d_prime)
+
+# Create a vector of participant IDs excluding 4004
+participant_ids <- unique(session_average_d_prime$participant_id)
+
+# Assign to the data frame
+dcm_data <- dcm_data %>%
+  mutate(participant_id = participant_ids)
+
+# Print the updated dcm_data to verify the change
+print(dcm_data)
+
+avg0123 <- session_average_d_prime
+avg0123$mean_d_prime[avg0123$curr_n_back=='0'] <- avg0123$mean_d_prime[avg0123$curr_n_back=='0'] * 0.5
+
+avg0123 <- avg0123 %>% 
+  group_by(participant_id) %>%  # Group by participant and n-back condition
+  summarise(mean_d_prime = mean(mean_d_prime, na.rm = TRUE)) %>%  # Calculate mean d'
+  ungroup()  # Remove grouping structure
+
+icombined_data <- avg0123 %>%
+  left_join(dcm_data, by = "participant_id")  # Join by participant ID
+
+
+# Print the combined data
+icombined_data
+
+```
+```{r}
+
+ # Extract column names
+connectivity_variables <- colnames(icombined_data)[grepl("^[lr]", colnames(icombined_data))]
+
+# Initialize a data frame to store correlation results with p-values
+Bayes_correlation_results_nback_intr <- data.frame(
+  Connectivity_Variable = character(),
+  median_r = numeric(),
+  CI_lower95_r = numeric(),
+  CI_upper95_r= numeric(),
+  Bayesian_Factor = numeric(),
+  Significance = character(),
+  stringsAsFactors = FALSE
+)
+
+interpret_bayes_factor <- function(bf) {
+  if (bf <= 1 ) {
+    interpretation <- "Null"
+  } else if (bf > 1 && bf <= 3) {
+    interpretation <- "Weak"
+  } else if (bf > 3 && bf <= 10) {
+    interpretation <- "Moderate"
+  } else if (bf > 10 && bf <= 30) {
+    interpretation <- "Strong"
+  } else if (bf > 30 && bf <= 100) {
+    interpretation <- "Very strong "
+  } else if (bf > 100) {
+    interpretation <- "Extreme"
+  } else {
+    interpretation <- "Uninterpretable value"
+  }
+  return(interpretation)
+}
+
+n_level = '0123'
+  # Filter data for 3-back condition
+  Bayes_intr_data_nback <-icombined_data 
+  
+
+    
+  # Loop through each connectivity variable, run cor.test, and extract the correlation coefficient and p-value
+  for (var in connectivity_variables) {
+    # Perform the cor.test for the current variable
+    
+    cor_test <- correlationBF(
+    x = Bayes_intr_data_nback$mean_d_prime,
+    y = Bayes_intr_data_nback[[var]]
+  )
+    set.seed(2025)
+    post <- posterior(cor_test, iterations = 50000)   # MCMC samples
+    rho  <- as.numeric(post[,"rho"])                # posterior draws of r
+    
+    median_r <- median(rho)
+    ci_r     <- quantile(rho, c(.025, .975))        # 95% credible interval
+    c(median_r = median_r, l95 = ci_r[1], u95 = ci_r[2])
+    # Determine significance based on p-value
+    # Convert to data frame and extract the BF value
+    bf_df <- as.data.frame(cor_test)
+    bf_value <- bf_df$bf[1] 
+    
+    significance <- interpret_bayes_factor(bf_value)
+    
+    # Determine significance based on p-value
+    # Convert to data frame and extract the BF value
+    bf_df <- as.data.frame(cor_test)
+    bf_value <- bf_df$bf[1] 
+    
+    significance <- interpret_bayes_factor(bf_value)
+    
+    # Append results to the data frame
+    Bayes_correlation_results_nback_intr <- rbind(Bayes_correlation_results_nback_intr, data.frame(
+      Connectivity_Variable = paste0('n',as.character(n_level),'back_', var),
+      Bayesian_Factor = bf_value,
+      median_r = median_r,
+      CI_lower95_r = ci_r[1],
+      CI_upper95_r = ci_r[2],
+      Significance = significance
+    ))
+  }
+
+# Print the updated correlation results with p-values and significance
+Bayes_correlation_results_nback_intr
+
+```
+```{r}
+
+
+filtered_bay_nback<- Bayes_correlation_results_nback_intr %>%
+  filter(Significance != "Null" )
+kept_indices <- which(Bayes_correlation_results_nback_intr$Significance != "Null")
+
+colr = c("#0072B2","#009E73","#D55E00", "#CC79A7")
+
+if (!is_empty(kept_indices)){
+  
+  for (i in 1:nrow(filtered_bay_nback))
+  {
+   n_level <-'0123'
+   
+    Bayes_intr_data_nback <-icombined_data 
+   
+    con_name = filtered_bay_nback[i,1]
+    area_name = substr(con_name, 11, nchar(con_name))
+    
+    
+    # Convert the Bayes Factor output to a data frame and extract the relevant value
+    bayes_factor_df_nback_intr <- as.data.frame(filtered_bay_nback[i,])
+    bayes_factor_nback_intr <- bayes_factor_df_nback_intr$Bayesian_Factor[1]  # Adjust as necessary based on the output structure
+    r_bf = bayes_factor_df_nback_intr$median_r
+    conn = Bayes_intr_data_nback[[area_name]][c(1:4,6:20)]
+    dprime =Bayes_intr_data_nback$mean_d_prime[c(1:4,6:20)]
+  
+  
+    # Create the plot
+    ibplot <- ggplot(Bayes_intr_data_nback, aes(x = mean_d_prime, y = .data[[area_name]])) +
+      geom_point(alpha = 0.6) +  # Scatter plot points
+      geom_smooth(method = "lm", color = colr[4], se = FALSE) +  # Regression line
+      labs(
+        title = paste0("Correlation of Sensitivity in the 0, 1 ,2 & 3 -back with \nIntrinsic Connectivity: from_", area_name), #as.character(n_level), 
+        x = "Mean Sensitivity (d')",
+        y =  "Connection Strength (Hz)"
+      ) +
+      theme_modern() + 
+      xlim(1, 3.5) +  
+      ylim(-1, 1) +
+     
+      theme(
+        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+        axis.title = element_text(size = 14)
+      ) +
+      # Add correlation and Bayes Factor text
+      annotate("text", x = Inf, y = Inf,
+               label = paste("BF:", round(bayes_factor_nback_intr, 3),"\nrho:",round(r_bf, 3)),
+               hjust = 1.1, vjust = 1.5, size = 4, color = "black", fontface = "italic")
+    #("r:", round(correlation_result_nback_intr, 3), "\nBF:", round(bayes_factor_nback_intr, 3),"\np:",round(p_val, 3), "\np-FDR:",round(p_adj, 3)),
+    
+    print(ibplot)
+   # ggsave(paste0("/data/pt_02809/MeMoSLAP/p4_dcm/final_codes/DCM_true_concat_512max/Performance_correlations/Bayes_dprime",as.character(n_level), "back_intrinsic_", area_name , ".png"), width = 7, height = 5, dpi = 1000)
+     
+  }
+}else {
+  print('No evidence at all')
+}
+
+
+```
+
+```{r}
+
+# Step 1: Extract participant ID without the task identifier
+rt_data <- Data_complete_clean %>%
+  mutate(participant_id = sapply(Data_complete_clean$participant, function(x) {
+  # Extract the single match of "40xx"
+  regmatches(x, regexpr("40\\d{2}", x))
+}))
+
+# Step 2: Filter for correct responses
+correct_responses <- rt_data %>%
+  filter(result == "Correct")
+
+# Step 3 & 4: Group by the participant ID and condition, then calculate mean reaction time
+reaction_times <- correct_responses %>%
+  group_by(participant_id, curr_n_back) %>%
+  summarise(mean_cor_rt = mean(response.rt, na.rm = TRUE)) %>%
+  ungroup()
+
+# Print the calculated reaction times
+reaction_times
+#write.csv(reaction_times, "/data/pt_02809/MeMoSLAP/p4_dcm/final_codes/nback_behaviour/tables/rt_raw.csv", row.names = FALSE, col.names = TRUE)
+
+```
+``` {r}
+#reaction_times <- read.csv("/data/pt_02809/MeMoSLAP/p4_dcm/final_codes/nback_behaviour/tables/rt_raw.csv", header = TRUE, stringsAsFactors = FALSE)
+
+rt_nback <- reaction_times
+rt_nback <- as.data.frame(rt_nback)
+rt_nback$curr_n_back <- as.factor(rt_nback$curr_n_back)
+
+rt_nback$out_flag <- NaN
+for (n in idx_nback) {
+  # Calculate Tukey's fences
+  Q1 <- quantile(rt_nback[rt_nback$curr_n_back==n, c("mean_cor_rt")], 0.25)
+  Q3 <- quantile(rt_nback[rt_nback$curr_n_back==n, c("mean_cor_rt")], 0.75)
+  IQR <- Q3 - Q1
+  lower_fence <- Q1 - 1.5 * IQR
+  upper_fence <- Q3 + 1.5 * IQR
+  rt_nback[rt_nback$curr_n_back==n, c("out_flag")] <- ifelse(rt_nback[rt_nback$curr_n_back==n, c("mean_cor_rt")] < lower_fence | rt_nback[rt_nback$curr_n_back==n, c("mean_cor_rt")] > upper_fence, "outlier", "inlier")
+}
+
+rt_nback
+
+
+
+```
+```{r}
+
+fried_test <- friedman.test(cbind(rt_nback$mean_cor_rt[rt_nback$curr_n_back==0],
+                                  rt_nback$mean_cor_rt[rt_nback$curr_n_back==1],
+                                  rt_nback$mean_cor_rt[rt_nback$curr_n_back==2],
+                                  rt_nback$mean_cor_rt[rt_nback$curr_n_back==3]))
+
+
+
+avg_rt_tests <- data.frame(
+  method = fried_test$method,
+  data = "0, 1, 2, 3 -back",
+  statistic = as.numeric(fried_test$statistic),
+  p_value = round(fried_test$p.value, 3),
+  p_bonferroni = NA
+)
+
+options(digits = 4)
+i = 0
+for (n in list( c("0", "1"), c("0", "2"),c("0", "3"), c("1", "2"),c("1", "3"), c("2", "3"))){
+  
+  x = rt_nback$mean_cor_rt[rt_nback$curr_n_back==as.numeric(n[1])]
+  y = rt_nback$mean_cor_rt[rt_nback$curr_n_back==as.numeric(n[2])]
+  wil_test <- paired_wilcox(x,y)
+  
+  ntest <- data.frame(
+    method = wil_test$method,
+    data = paste0(n[1],' vs ',n[2],' -back'),
+    statistic = NA,
+    p_value = round(wil_test$p.value, 3),
+    p_bonferroni = round(wil_test$p.value*n_com, 3)
+  )
+  
+  avg_rt_tests[2+i,] <- ntest 
+  i = i+1
+  
+}
+
+avg_rt_tests
+
+
+#write.csv(avg_rt_tests, "/data/pt_02809/MeMoSLAP/p4_dcm/final_codes/nback_behaviour/tables/rt_main_stat_tests.csv", row.names = FALSE, col.names = TRUE)
+```
+
+
+```{r}
+
+rtn <-ggplot(rt_nback, aes(x=curr_n_back, y=mean_cor_rt, fill=curr_n_back)) +
+  geom_violin() + #outlier.colour="red", outlier.shape=8, outlier.size=1.5, notch=FALSE) +
+  geom_boxplot(width = 0.1, color = "black", fill = NA,outlier.shape = NA) + 
+  geom_jitter(position=position_jitter(0.03), aes(color = out_flag), size = 0.5)+
+  scale_color_manual(values = c("black", "red3"))
+
+
+if (avg_rt_tests$p_value[1] <= 0.05){
+  rtn <- rtn+ 
+    geom_signif(
+      comparisons = list( c("0", "1"), c("1", "2"), c("2", "3")),
+      map_signif_level = c("***"=0.001/n_com, "**"=0.01/n_com, "*"=0.05/n_com), 
+      y_position = 1.25-0.3, textsize = 5, vjust = 0.8, test  =paired_wilcox) +
+    geom_signif(
+      comparisons = list( c("0", "2")),
+      map_signif_level = c("***"=0.001/n_com, "**"=0.01/n_com, "*"=0.05/n_com),
+      y_position = 1.3-0.3, textsize = 5,  vjust = 0.8, tip_length = 0.02, test  = paired_wilcox) +
+    geom_signif(
+      comparisons = list(c("1", "3")),
+      map_signif_level = c("***"=0.001/n_com, "**"=0.01/n_com, "*"=0.05/n_com),
+      y_position = 1.35-0.3, textsize = 5,  vjust = 0.8, tip_length = 0.02, test  = paired_wilcox) +
+    geom_signif(
+      comparisons = list( c("0", "3")),
+      map_signif_level = c("***"=0.001/n_com, "**"=0.01/n_com, "*"=0.05/n_com),
+      y_position =1.4-0.3, textsize = 5,  vjust = 0.8, test  = paired_wilcox) 
+} else {
+  rtn <- rtn+stat_compare_means(label.y = 1.3)
+}
+
+rtn <- rtn+
+  ylim(0.4, 1.15) +
+  #ggtitle("Response Speed per n-back Condition (only hit trials)") + # for the main title
+  labs(x = "n-back Condition", y = "Response Time (sec)")+
+  theme_modern() +
+ # annotate("text", x = Inf, y = Inf,
+       #    label = paste("Friedman Test, p ~", as.character(round(as.numeric(fried_test["p.value"],3))), "\nPost-hoc Pairwise Wilcoxon Signed-Rank Test"),
+      #     hjust = 1, vjust = 1, size = 4, color = "black", fontface = "italic")+
+  scale_fill_okabeito(palette = "full", order = c(1, 5, 3, 6)) +
+    theme(legend.position = "none")+
+    theme(
+      axis.ticks.length = unit(5, "pt"),  # makes ticks longer (more dash-like)
+      axis.ticks = element_line(size = 0.5, linetype = "solid", color = "black")
+    )
+
+
+  
+rtn
+
+
+```
+```{r}
+
+# Step 1: Extract participant ID without the task identifier
+rt_data_sess <- Data_complete_clean %>%
+  mutate(participant_id = sapply(Data_complete_clean$participant, function(x) {
+  # Extract the single match of "40xx"
+  regmatches(x, regexpr("40\\d{2}", x))})) %>%
+  mutate(session =  ifelse(grepl("1$", Data_complete_clean$participant), "1",
+                      ifelse(grepl("2$", Data_complete_clean$participant), "2", NA)))
+
+# Step 2: Filter for correct responses
+correct_responses_sess <- rt_data_sess %>%
+  filter(result == "Correct")
+
+# Step 3 & 4: Group by the participant ID and condition, then calculate mean reaction time
+reaction_times_sess <- correct_responses_sess %>%
+  group_by(participant_id, session, curr_n_back) %>%
+  summarise(mean_cor_rt = mean(response.rt, na.rm = TRUE)) %>%
+  ungroup()
+
+# Print the calculated reaction times
+reaction_times_sess
+
+#write.csv(reaction_times_sess, "/data/pt_02809/MeMoSLAP/p4_dcm/final_codes/nback_behaviour/tables/rt_sess_raw.csv", row.names = FALSE, col.names = TRUE)
+
+```
+```{r}
+#reaction_times_sess <- read.csv("/data/pt_02809/MeMoSLAP/p4_dcm/final_codes/nback_behaviour/tables/rt_sess_raw.csv", header = TRUE, stringsAsFactors = FALSE)
+
+rt_sess <- as.data.frame(reaction_times_sess) 
+
+rt_sess$session <- as.factor(rt_sess$session)
+rt_sess$curr_n_back <- as.factor(rt_sess$curr_n_back)
+
+rt_sess$out_flag <- NaN
+
+idx_nback <- unique(rt_sess$curr_n_back)
+sess <- unique(rt_sess$session)
+for (n in idx_nback) {
+  for (s in sess) {
+    # Calculate Tukey's fences
+    Q1 <- quantile(rt_sess[rt_sess$curr_n_back==n & rt_sess$session==s, c("mean_cor_rt")], 0.25)
+    Q3 <- quantile(rt_sess[rt_sess$curr_n_back==n & rt_sess$session==s, c("mean_cor_rt")], 0.75)
+    IQR <- Q3 - Q1
+    lower_fence <- Q1 - 1.5 * IQR
+    upper_fence <- Q3 + 1.5 * IQR
+    rt_sess[rt_sess$curr_n_back==n & rt_sess$session==s, c("out_flag")]<- ifelse(rt_sess[rt_sess$curr_n_back==n & rt_sess$session==s, c("mean_cor_rt")] < lower_fence | rt_sess[rt_sess$curr_n_back==n & rt_sess$session==s, c("mean_cor_rt")] > upper_fence, "outlier", "inlier")
+  }
+}
+
+rt_sess
+
+```
+```{r}
+df_art_rt <- art(mean_cor_rt ~ curr_n_back * session + (1 | participant_id), data = rt_sess)
+
+# Perform ART ANOVA
+art_anova_results_rt <- anova(df_art_rt)
+
+# Print results
+art_anova_results_rt
+
+if (art_anova_results['session','Pr(>F)']<=0.05 | art_anova_results['curr_n_back:session','Pr(>F)']<=0.05)
+{
+  wide_ses <- rt_sess %>%
+    unite("back_sess", curr_n_back, session, sep = "back_sess") %>%  # combine back and sess
+    pivot_wider(
+      id_cols = participant_id,
+      names_from = back_sess,
+      values_from = mean_cor_rt
+    )
+  
+  wide_matrix <- wide_ses %>%
+    select(-participant_id) %>%       # Remove the identifier column
+    as.matrix()             # Convert to matrix
+  
+  # Get all unique pairwise combinations of columns
+  combinations <- combn(colnames(wide_matrix), 2, simplify = FALSE)
+  
+  # Apply paired Wilcoxon test to each pair
+  wilcox_results <- lapply(combinations, function(pair) {
+    test <- wilcox.test(wide_matrix[, pair[1]], wide_matrix[, pair[2]], paired = TRUE, exact = FALSE)
+    data.frame(
+      group1 = pair[1],
+      group2 = pair[2],
+      p_value = test$p.value
+    )
+  })
+  
+  # Combine results into a data frame
+  results_df_rt <- do.call(rbind, wilcox_results)
+  
+  # Apply Bonferroni correction
+  results_df_rt$adjusted_p <- p.adjust(results_df_rt$p_value, method = "fdr")
+  
+
+  results_df_rt <- results_df_rt %>%
+    mutate(significance = case_when(
+      adjusted_p <= 0.001 ~ "***",
+      adjusted_p <= 0.01  ~ "**",
+      adjusted_p <= 0.05  ~ "*",
+      TRUE                ~ "ns"
+    ))
+  results_df_rt
+}
+
+```
+```{r}
+
+rts <- ggplot(rt_sess, aes(x = curr_n_back, y = mean_cor_rt, fill = interaction(session,curr_n_back))) +
+  geom_violin() + 
+  geom_boxplot(aes(group = interaction(session,curr_n_back)), position = position_dodge(width = 0.9), width = 0.1, color = "black", fill = NA,outlier.shape = NA) +
+  geom_point(aes(group = interaction(session,curr_n_back)), position = position_dodge(width = 0.9), size = 0.5,color = "black") +
+  
+  # Lines connecting data points from session 1 to session 2
+  geom_line(aes(x = as.numeric(curr_n_back) + 
+                  ifelse(session == levels(session)[1], -0.375/2, 0.375/2), 
+                group = interaction(participant_id, curr_n_back)),
+            alpha = 0.6, color = "gray40", linetype = "dotted") + 
+  labs(x = "n-back Condition", y = "Response Time (sec)")+
+  theme_modern() +
+  scale_fill_manual(name = "nback x session", labels = c("0back in ses-1","0back in ses-2","1back in ses-1","1back in ses-2","2back in ses-1","2back in ses-2","3back in ses-1","3back in ses-2"),
+                    values = c( "goldenrod1","goldenrod3", "dodgerblue","dodgerblue3","seagreen3","seagreen4","tomato1","tomato3")) +
+  scale_color_manual(name = "nback x session", labels = c("0back in ses-1","0back in ses-2","1back in ses-1","1back in ses-2","2back in ses-1","2back in ses-2","3back in ses-1","3back in ses-2"),
+                     values = c( "goldenrod3","goldenrod4","dodgerblue3","dodgerblue4","seagreen4","darkgreen","tomato3","tomato4")) +
+  #scale_fill_okabeito(palette = "full", order = c(1, 5, 3, 6))+ 
+  theme(
+    axis.ticks.length = unit(5, "pt"),  # makes ticks longer (more dash-like)
+    axis.ticks = element_line(size = 0.5, linetype = "solid", color = "black")
+  )
+
+rts <- rts+
+  ylim(0.4, 1) +
+  #ggtitle("Response Speed per n-back Condition (only hit trials)") + # for the main title
+  labs(x = "n-back Condition", y = "Response Speed (sec)")+
+  theme_modern() +
+  # annotate("text", x = Inf, y = Inf,
+  #    label = paste("Friedman Test, p ~", as.character(round(as.numeric(fried_test["p.value"],3))), "\nPost-hoc Pairwise Wilcoxon Signed-Rank Test"),
+  #     hjust = 1, vjust = 1, size = 4, color = "black", fontface = "italic")+
+  #scale_fill_okabeito(palette = "full", order = c(1, 5, 3, 6)) +
+  #theme(legend.position = "none")+
+  theme(
+    axis.ticks.length = unit(5, "pt"),  # makes ticks longer (more dash-like)
+    axis.ticks = element_line(size = 0.5, linetype = "solid", color = "black")
+  )
+rts
+
+```
+
+```{r}
+# Filter out the 0-back condition
+reaction_times_123 <- reaction_times %>%
+  filter(curr_n_back != 0)
+
+# Print the filtered reaction times to verify
+reaction_times_123
+
+```
+
+```{r}
+# Merge the filtered reaction times with the combined data
+mcombined_data <- mcombined_data %>%
+  left_join(reaction_times_123, by = c("participant_id", "curr_n_back"))
+
+mcombined_data
+
+```
+
+```{r}
+# Initialize a data frame to store correlation results with p-values
+Bayes_correlation_results_nback_mod_rt <- data.frame(
+  Connectivity_Variable = character(),
+  Bayesian_Factor = numeric(),
+  median_r = numeric(),
+  CI_lower95_r = numeric(),
+  CI_upper95_r= numeric(),
+  Significance = character(),
+  stringsAsFactors = FALSE
+)
+
+interpret_bayes_factor <- function(bf) {
+  if (bf <= 1 ) {
+    interpretation <- "Null"
+  } else if (bf > 1 && bf <= 3) {
+    interpretation <- "Weak"
+  } else if (bf > 3 && bf <= 10) {
+    interpretation <- "Moderate"
+  } else if (bf > 10 && bf <= 30) {
+    interpretation <- "Strong"
+  } else if (bf > 30 && bf <= 100) {
+    interpretation <- "Very strong "
+  } else if (bf > 100) {
+    interpretation <- "Extreme"
+  } else {
+    interpretation <- "Uninterpretable value"
+  }
+  return(interpretation)
+}
+
+for (n_level in 1:3) {
+  # Filter data for 3-back condition
+  Bayes_mod_data_nback <-mcombined_data %>%
+    filter(curr_n_back == n_level)
+  
+  # Extract column names
+    connectivity_variables <- colnames(mcombined_data)[startsWith(colnames(mcombined_data), paste0('n',as.character(n_level)))]
+    
+  # Loop through each connectivity variable, run cor.test, and extract the correlation coefficient and p-value
+  for (var in connectivity_variables) {
+    # Perform the cor.test for the current variable
+    
+    cor_test <- correlationBF(
+    x = Bayes_mod_data_nback$mean_cor_rt,
+    y = Bayes_mod_data_nback[[var]]
+  )
+    
+    
+    
+    set.seed(2025)
+    post <- posterior(cor_test, iterations = 50000)   # MCMC samples
+    rho  <- as.numeric(post[,"rho"])                # posterior draws of r
+    
+    median_r <- median(rho)
+    ci_r     <- quantile(rho, c(.025, .975))        # 95% credible interval
+    c(median_r = median_r, l95 = ci_r[1], u95 = ci_r[2])
+    # Determine significance based on p-value
+    # Convert to data frame and extract the BF value
+    bf_df <- as.data.frame(cor_test)
+    bf_value <- bf_df$bf[1] 
+    
+    significance <- interpret_bayes_factor(bf_value)
+    
+    # Append results to the data frame
+    Bayes_correlation_results_nback_mod_rt <- rbind(Bayes_correlation_results_nback_mod_rt, data.frame(
+      Connectivity_Variable = var,
+      Bayesian_Factor = bf_value,
+      median_r = median_r,
+      CI_lower95_r = ci_r[1],
+      CI_upper95_r = ci_r[2],
+      Significance = significance
+    ))
+  }
+}
+# Print the updated correlation results with p-values and significance
+Bayes_correlation_results_nback_mod_rt
+
+```
+
+```{r}
+
+
+filtered_bay_nback<- Bayes_correlation_results_nback_mod_rt %>%
+  filter(Significance != "Null" )
+
+kept_indices <- which(Bayes_correlation_results_nback_mod_rt$Significance != "Null")
+
+colr = c("#0072B2","#009E73","#D55E00") #E69F00
+
+if (!is_empty(kept_indices))
+{
+  for (i in 1:nrow(filtered_bay_nback))
+  {
+   n_level <- filtered_bay_nback$Connectivity_Variable[i]
+   n_level <- as.numeric(substr(n_level, 2, 2))
+   
+    Bayes_mod_data_nback <-mcombined_data %>%
+      filter(curr_n_back == n_level)
+   
+   
+    con_name = filtered_bay_nback[i,1]
+    just_con = substr(con_name, 8, nchar(con_name))
+    
+    # Convert the Bayes Factor output to a data frame and extract the relevant value
+    bayes_factor_df_nback_mod <- as.data.frame(filtered_bay_nback[i,])
+    bayes_factor_nback_mod <- bayes_factor_df_nback_mod$Bayesian_Factor[1]  # Adjust as necessary based on the output structure
+    r_bf = bayes_factor_df_nback_mod$median_r
+   
+    
+    
+    # Create the plot
+    mbplot_rt <- ggplot(Bayes_mod_data_nback, aes(x = mean_cor_rt, y = .data[[con_name]])) +
+      geom_point(alpha = 0.6) +  # Scatter plot points
+      geom_smooth(method = "lm", color = colr[n_level], se = FALSE) +  # Regression line
+      labs(
+        title = paste0("Correlation of Response Time with Connectivity Modulation: \n", just_con, " in ", as.character(n_level), "-back"),
+        x = "Response Time (sec)",
+        y =  "Modulation (Hz)"
+      ) +
+      theme_modern() + 
+      xlim(1, 3.5) +  
+      ylim(-1, 1) +
+     
+      theme(
+        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+        axis.title = element_text(size = 14)
+      ) +
+      # Add correlation and Bayes Factor text
+      annotate("text", x = Inf, y = Inf,
+               label = paste("BF:", round(bayes_factor_nback_mod, 3),"\nrho:",round(r_bf, 3)), 
+               hjust = 1.1, vjust = 1.5, size = 4, color = "black", fontface = "italic")
+    
+    
+    print(mbplot_rt)
+    
+   # ggsave(paste0("/data/pt_02809/MeMoSLAP/p4_dcm/final_codes/DCM_true_concat_results/Performance_correlations/Bayes_rt_",as.character(n_level), "back_modulatory_", con_name , ".png"), width = 7, height = 5, dpi = 1000)
+     
+    
+  }
+
+}else {
+  print('No evidence at all')
+}
+```
+
+
+```{r}
+
+avg0123_rt <- reaction_times
+avg0123_rt$mean_cor_rt[avg0123$curr_n_back=='0'] <- avg0123_rt$mean_cor_rt[avg0123_rt$curr_n_back=='0'] * 0.5
+
+avg0123_rt <- avg0123_rt %>% 
+  group_by(participant_id) %>%  # Group by participant and n-back condition
+  summarise(mean_cor_rt = mean(mean_cor_rt, na.rm = TRUE)) %>%  # Calculate mean d'
+  ungroup()  # Remove grouping structure
+
+icombined_data <- avg0123_rt %>%
+  left_join(icombined_data, by = "participant_id")  # Join by participant ID
+
+
+# Print the combined data
+icombined_data
+
+```
+```{r}
+
+
+ # Extract column names
+connectivity_variables <- colnames(icombined_data)[grepl("^[lr]", colnames(icombined_data))]
+
+# Initialize a data frame to store correlation results with p-values
+Bayes_correlation_results_nback_intr_rt <- data.frame(
+  Connectivity_Variable = character(),
+  median_r = numeric(),
+  CI_lower95_r = numeric(),
+  CI_upper95_r= numeric(),
+  Bayesian_Factor = numeric(),
+  Significance = character(),
+  stringsAsFactors = FALSE
+)
+
+interpret_bayes_factor <- function(bf) {
+  if (bf <= 1 ) {
+    interpretation <- "Null"
+  } else if (bf > 1 && bf <= 3) {
+    interpretation <- "Weak"
+  } else if (bf > 3 && bf <= 10) {
+    interpretation <- "Moderate"
+  } else if (bf > 10 && bf <= 30) {
+    interpretation <- "Strong"
+  } else if (bf > 30 && bf <= 100) {
+    interpretation <- "Very strong "
+  } else if (bf > 100) {
+    interpretation <- "Extreme"
+  } else {
+    interpretation <- "Uninterpretable value"
+  }
+  return(interpretation)
+}
+
+n_level = '0123'
+  # Filter data for 3-back condition
+  Bayes_intr_data_nback <-icombined_data 
+  
+
+    
+  # Loop through each connectivity variable, run cor.test, and extract the correlation coefficient and p-value
+  for (var in connectivity_variables) {
+    # Perform the cor.test for the current variable
+    
+    cor_test <- correlationBF(
+    x = Bayes_intr_data_nback$mean_cor_rt,
+    y = Bayes_intr_data_nback[[var]]
+  )
+    set.seed(2025)
+    post <- posterior(cor_test, iterations = 50000)   # MCMC samples
+    rho  <- as.numeric(post[,"rho"])                # posterior draws of r
+    
+    median_r <- median(rho)
+    ci_r     <- quantile(rho, c(.025, .975))        # 95% credible interval
+    c(median_r = median_r, l95 = ci_r[1], u95 = ci_r[2])
+    # Determine significance based on p-value
+    # Convert to data frame and extract the BF value
+    bf_df <- as.data.frame(cor_test)
+    bf_value <- bf_df$bf[1] 
+    
+    significance <- interpret_bayes_factor(bf_value)
+    
+    # Determine significance based on p-value
+    # Convert to data frame and extract the BF value
+    bf_df <- as.data.frame(cor_test)
+    bf_value <- bf_df$bf[1] 
+    
+    significance <- interpret_bayes_factor(bf_value)
+    
+    # Append results to the data frame
+    Bayes_correlation_results_nback_intr_rt <- rbind(Bayes_correlation_results_nback_intr_rt, data.frame(
+      Connectivity_Variable = paste0('n',as.character(n_level),'back_', var),
+      Bayesian_Factor = bf_value,
+      median_r = median_r,
+      CI_lower95_r = ci_r[1],
+      CI_upper95_r = ci_r[2],
+      Significance = significance
+    ))
+  }
+
+# Print the updated correlation results with p-values and significance
+Bayes_correlation_results_nback_intr_rt
+
+```
+
+```{r}
+
+
+filtered_bay_nback<- Bayes_correlation_results_nback_intr_rt %>%
+  filter(Significance != "Null" )
+kept_indices <- which(Bayes_correlation_results_nback_intr_rt$Significance != "Null")
+
+colr = c("#0072B2","#009E73","#D55E00", "#CC79A7")
+
+if (!is_empty(kept_indices)){
+  
+  for (i in 1:nrow(filtered_bay_nback))
+  {
+   n_level <-'0123'
+   
+    Bayes_intr_data_nback <-icombined_data 
+   
+    con_name = filtered_bay_nback[i,1]
+    area_name = substr(con_name, 11, nchar(con_name))
+    
+    
+    # Convert the Bayes Factor output to a data frame and extract the relevant value
+    bayes_factor_df_nback_intr <- as.data.frame(filtered_bay_nback[i,])
+    bayes_factor_nback_intr <- bayes_factor_df_nback_intr$Bayesian_Factor[1]  # Adjust as necessary based on the output structure
+    r_bf = bayes_factor_df_nback_intr$median_r
+    conn = Bayes_intr_data_nback[[area_name]][c(1:4,6:20)]
+    dprime =Bayes_intr_data_nback$mean_d_prime[c(1:4,6:20)]
+  
+  
+    # Create the plot
+    ibplot <- ggplot(Bayes_intr_data_nback, aes(x = mean_cor_rt, y = .data[[area_name]])) +
+      geom_point(alpha = 0.6) +  # Scatter plot points
+      geom_smooth(method = "lm", color = colr[4], se = FALSE) +  # Regression line
+      labs(
+        title = paste0("Correlation of Sensitivity in the 0, 1 ,2 & 3 -back with \nIntrinsic Connectivity: from_", area_name), #as.character(n_level), 
+        x = "Mean Reaction Time (sec)",
+        y =  "Connection Strength (Hz)"
+      ) +
+      theme_modern() + 
+      xlim(0.4, 0.8) +  
+      ylim(-1, 1) +
+     
+      theme(
+        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+        axis.title = element_text(size = 14)
+      ) +
+      # Add correlation and Bayes Factor text
+      annotate("text", x = Inf, y = Inf,
+               label = paste("BF:", round(bayes_factor_nback_intr, 3),"\nrho:",round(r_bf, 3)),
+               hjust = 1.1, vjust = 1.5, size = 4, color = "black", fontface = "italic")
+    #("r:", round(correlation_result_nback_intr, 3), "\nBF:", round(bayes_factor_nback_intr, 3),"\np:",round(p_val, 3), "\np-FDR:",round(p_adj, 3)),
+    
+    print(ibplot)
+   # ggsave(paste0("/data/pt_02809/MeMoSLAP/p4_dcm/final_codes/DCM_true_concat_512max/Performance_correlations/Bayes_dprime",as.character(n_level), "back_intrinsic_", area_name , ".png"), width = 7, height = 5, dpi = 1000)
+     
+  }
+}else {
+  print('No evidence at all')
+}
+
+
+```

@@ -1,0 +1,162 @@
+---
+title: "Find dprime outliers"
+author: "Gerasimos Gerardos"
+date: "2026-02-11"
+output: html_document
+---
+
+Script Information
+
+Title: Find d′ Outliers
+Author: Gerasimos Gerardos
+Project: MeMoSLAP Project (P04–Leipzig)
+Associated Paper: Task load modulates network interactions between bilateral fronto-parietal and cerebellar areas during verbal working memory
+
+Description
+
+This script was written by Gerasimos Gerardos for the MeMoSLAP Project (P04–Leipzig) as part of the analyses conducted for the paper Task load modulates network interactions between bilateral fronto-parietal and cerebellar areas during verbal working memory.
+
+This script processes multiple behavioral task data files, combines them into a single cleaned dataset, and computes performance metrics for each participant and task difficulty level. It calculates accuracy, hit rates, false alarm rates, and sensitivity (d′) using signal detection theory with adjusted ratios. Based on these values, the script identifies blocks with poor performance (d′ ≤ 0) as outliers and exports them to a CSV file to use when setting nuisance regressors in later steps.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Core data handling
+library(tidyverse)
+
+# Mixed models (if needed later)
+library(lme4)
+library(lmerTest)
+library(nlme)
+```
+Set working directory
+
+```{r}
+work_directory <- "/data/behavior/long_task_table" # adjust to your directrory 
+setwd(work_directory)
+
+```
+
+```{r}
+files <- list.files(work_directory, pattern = "*.csv", full.names = TRUE)
+
+# Initialize an empty list to store data frames
+data_list <- list()
+
+# Read each file and store it in the list
+for (file in files) {
+  tryCatch({
+    # Read each CSV file with the full path
+    data <- read.csv(file, header = TRUE, sep = ",", na.strings = "NA", stringsAsFactors = FALSE)
+    # Store the data frame in the list
+    data_list[[file]] <- data
+  }, error = function(e) {
+    cat("Error in file:", file, "\n", e, "\n")
+  })
+}
+```
+
+Files connected:
+
+```{r}
+
+# Identify common columns
+common_cols <- Reduce(intersect, lapply(data_list, names))
+
+# Filter each data frame to include only common columns
+filtered_data_list <- lapply(data_list, function(df) df[, common_cols, drop = FALSE])
+
+# Combine data frames using bind_rows
+Data_complete <- do.call(rbind,filtered_data_list)
+
+## create a Data Set that ommits the NA values of the variable curr_n_back:
+
+Data_complete_clean <- Data_complete[!is.na(Data_complete$curr_n_back), ]
+
+# Check the structure of the new data set
+#str(Data_complete_clean)
+
+```
+
+Accuracy:
+
+```{r}
+
+# Calculate accuracy, false alarm rate, and miss rate by participant and difficulty level (curr_n_back)
+metrics_by_condition <- Data_complete_clean %>%
+  group_by(participant, curr_n_back) %>%
+  summarise(
+    Correct = sum(result == "Correct", na.rm = TRUE),
+    Correct_rejected = sum(result == "Okay", na.rm = TRUE),
+    Miss = sum(result == "Absent", na.rm = TRUE),
+    False_Alarm = sum(result == "Incorrect", na.rm = TRUE),
+    Total = n()
+  ) %>%
+  mutate(
+    Accuracy = (Correct + Correct_rejected) / Total,
+    False_Alarm_rate = False_Alarm / Total,
+    Miss_rate = Miss / Total
+  )
+
+
+```
+
+d' analysis
+
+```{r}
+# adjusted ratios (Hautus, 1995) --> recommended by Gerry: Maybe ask him again? https://www.researchgate.net/post/What-does-a-high-D-prime-score-mean
+      # https://neuropsychology.github.io/psycho.R/2018/03/29/SDT.html
+
+# Calculate hit rate (HR) and false alarm rate (FAR) for each participant and condition
+hit_false_alarm_rates <- Data_complete_clean %>%
+  group_by(participant, curr_n_back, block.thisN) %>%
+  summarise(
+    Hits = sum(result == "Correct", na.rm = TRUE),
+    Misses = sum(result == "Absent", na.rm = TRUE),
+    False_Alarms = sum(result == "Incorrect", na.rm = TRUE),
+    Correct_Rejections = sum(result == "Okay", na.rm = TRUE),
+    Total_Target = Hits + Misses,
+    Total_NonTarget = False_Alarms + Correct_Rejections,
+    
+    HR = (sum(result == "Correct", na.rm = TRUE) + 0.5) / (sum(result == "Correct", na.rm = TRUE) + sum(result == "Absent", na.rm = TRUE) + 1), # Adjusted Hit Rate: Hautus correction
+    FAR = (sum(result == "Incorrect", na.rm = TRUE) + 0.5) / (sum(result == "Incorrect", na.rm = TRUE) + sum(result == "Okay", na.rm = TRUE) + 1)  # Adjusted False Alarm Rate: Hautus correction
+  )
+
+# Compute d' for each participant and condition
+d_prime_values <- hit_false_alarm_rates %>%
+  mutate(d_prime = qnorm(HR) - qnorm(FAR)) %>%
+  ungroup() %>%
+  select(participant, curr_n_back, d_prime, block.thisN) %>%
+  distinct() # Keep unique values
+
+d_prime_values$session[grepl("1$", d_prime_values$participant)] <- "1"
+d_prime_values$session[grepl("2$", d_prime_values$participant)] <- "2"
+
+d_prime_values$participant <- sapply(d_prime_values$participant, function(x) {
+  # Extract the single match of "40xx"
+  regmatches(x, regexpr("40\\d{2}", x))
+})
+
+# Print the d' values
+d_prime_values
+
+#write.csv(d_prime_values, "/results/task_analysis/d_values_raw", row.names = FALSE, col.names = TRUE)
+
+```
+```{r}
+# outliar blocks
+# load the raw table if raw data not available
+#d_prime_values <- read.csv("/results/task_analysis/d_values_raw.csv", header = TRUE, stringsAsFactors = FALSE)
+
+out_blocks <- d_prime_values[d_prime_values$d_prime<=0 , c("participant","session","block.thisN","curr_n_back")]
+colnames(out_blocks) <-c("code","session","order","nback")
+out_blocks$order <- out_blocks$order + 1 # adjust because of index 0
+
+out_blocks <- as.data.frame(out_blocks)
+
+out_blocks
+
+write.csv(out_blocks, "/results/task_analysis/outliar_blocks.csv", row.names=FALSE) #change to your directory
+
+
+```
